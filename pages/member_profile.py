@@ -1,11 +1,23 @@
-# pages/subscriptions.py
-# GymPro — SubscriptionsPage (fast & complete UI; grid-only inside cards)
+# /pages/member_profile.py
+# GymPro — Member Profile (CustomTkinter)
+# Profile + screenshot-style form fields + subscription + visits (compact, no page scroll)
 
+from __future__ import annotations
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import datetime as dt
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 
+# ---- optional camera (safe if not installed) ----
 try:
-    from router import PALETTE as SHARED_PALETTE
+    import cv2
+    HAS_CV2 = True
+except Exception:
+    HAS_CV2 = False
+
+# ---- palette (keeps your visual ID) ----
+try:
+    from router import PALETTE as SHARED_PALETTE  # type: ignore
 except Exception:
     SHARED_PALETTE = None
 
@@ -22,289 +34,425 @@ PALETTE = SHARED_PALETTE or {
     "danger":   "#ef4444",
 }
 
-# ---------- small helpers ----------
-def _title(parent, text: str):
-    return ctk.CTkLabel(parent, text=text, text_color=PALETTE["text"], font=("Segoe UI Semibold", 15))
+STATUSES = ["active", "suspended", "expired", "blacklisted"]
+SEXES = ["Male", "Female", "Other"]
+PLANS = ["Monthly", "Quarterly", "Yearly"]
 
-class Card(ctk.CTkFrame):
-    """Rounded card; uses GRID internally (important: children must grid)."""
-    def __init__(self, master, title: str = "", *, corner_radius: int = 16, fg=None):
-        super().__init__(master, fg_color=fg or PALETTE["card"], corner_radius=corner_radius)
+# ---------- atoms ----------
+class SectionCard(ctk.CTkFrame):
+    def __init__(self, master, title: str):
+        super().__init__(master, fg_color=PALETTE["card"], corner_radius=16)
         self.grid_columnconfigure(0, weight=1)
-        if title:
-            _title(self, title).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))
+        ctk.CTkLabel(self, text=title, text_color=PALETTE["text"],
+                     font=("Segoe UI Semibold", 15)).grid(row=0, column=0, sticky="w", padx=14, pady=(10,6))
 
 class Pill(ctk.CTkFrame):
-    """Status tag."""
-    def __init__(self, master, text: str, kind: str = "muted"):
-        colors = {
-            "ok": ("#20321f", PALETTE["ok"]),
-            "warn": ("#33240f", PALETTE["warn"]),
-            "danger": ("#3a1418", PALETTE["danger"]),
-            "muted": ("#2b3344", PALETTE["muted"]),
-        }
-        bg, fg = colors.get(kind, colors["muted"])
+    def __init__(self, master, text: str, bg: str, fg: str):
         super().__init__(master, fg_color=bg, corner_radius=999)
-        ctk.CTkLabel(self, text=text, text_color=fg, font=("Segoe UI", 12)).grid(row=0, column=0, padx=10, pady=4)
+        ctk.CTkLabel(self, text=text, text_color=fg, font=("Segoe UI Semibold", 14)).grid(
+            row=0, column=0, padx=12, pady=6
+        )
+
+class SmallIconBtn(ctk.CTkButton):
+    def __init__(self, master, text="🗓", **kw):
+        super().__init__(master, text=text, width=34, height=34, corner_radius=10,
+                         fg_color="#2b3344", hover_color="#38445a", **kw)
+
+# screenshot-style input + labeled row
+class ScreenshotEntry(ctk.CTkEntry):
+    def __init__(self, master, placeholder_text: str):
+        super().__init__(
+            master,
+            placeholder_text=placeholder_text,
+            height=40,
+            corner_radius=10,
+            fg_color="#2a313d",
+            text_color=PALETTE["text"],
+            placeholder_text_color="#9aa3b6",
+            border_color="#455066",
+            border_width=2,
+        )
+
+class FormRow(ctk.CTkFrame):
+    """Label on the left + field on the right, full-width row."""
+    def __init__(self, master, label_text: str, field_widget: ctk.CTkBaseClass):
+        super().__init__(master, fg_color="transparent")
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(self, text=label_text, text_color=PALETTE["text"]).grid(
+            row=0, column=0, sticky="w", padx=(0,12)
+        )
+        field_widget.grid(row=0, column=1, sticky="ew")
+        self.field = field_widget
+
+class BigOptionMenu(ctk.CTkOptionMenu):
+    def __init__(self, master, values: Sequence[str]):
+        super().__init__(master, values=list(values), height=36, corner_radius=12,
+                         fg_color="#2b3344", button_color="#2b3344",
+                         button_hover_color="#3a455e", text_color=PALETTE["text"])
+
+class Table(ctk.CTkScrollableFrame):
+    def __init__(self, master, headers: Sequence[str]):
+        super().__init__(master, fg_color="transparent")
+        self._rows: List[ctk.CTkFrame] = []
+        hdr = ctk.CTkFrame(self, fg_color="transparent")
+        hdr.pack(fill="x", padx=8, pady=(0,2))
+        for i, name in enumerate(headers):
+            ctk.CTkLabel(hdr, text=name, text_color=PALETTE["muted"]).grid(
+                row=0, column=i, sticky="w", padx=(12 if i==0 else 8, 8)
+            )
+
+    def set_rows(self, rows: Iterable[Sequence[str]]):
+        for r in self._rows:
+            r.destroy()
+        self._rows.clear()
+        for data in rows:
+            row = ctk.CTkFrame(self, fg_color=PALETTE["card2"], corner_radius=10)
+            row.pack(fill="x", padx=8, pady=4)
+            for i, txt in enumerate(data):
+                ctk.CTkLabel(row, text=str(txt),
+                             text_color=PALETTE["text"] if i in (0, 3) else PALETTE["muted"]).grid(
+                    row=0, column=i, sticky="w", padx=(12 if i==0 else 8, 8), pady=6
+                )
+            self._rows.append(row)
 
 # ---------- page ----------
-class SubscriptionsPage(ctk.CTkFrame):
+class MemberProfilePage(ctk.CTkFrame):
     """
-    Subscriptions with:
-      - Search (member name / plan)
-      - Filters (status, plan)
-      - Results table (scrollable)
-      - Actions: New, Renew, Freeze, Cancel
-    Expected optional services:
-      - list_subscriptions(member_id: int|None=None) -> list[dict]
-      - renew_subscription(subscription_id)
-      - freeze_subscription(subscription_id)
-      - cancel_subscription(subscription_id)
-    Subscription dict fields used: subscription_id, member_id, plan, status, start_date, end_date,
-                                   member_name(optional)
+    services (optional):
+      - members.get(id), members.update(id, data)
+      - subscriptions.current(id)
+      - checkins.history(id, limit)
     """
-    def __init__(self, master, services=None):
+    def __init__(self, master, services: Optional[object] = None,
+                 member_id: Optional[str] = None, on_back=None):
         super().__init__(master, fg_color=PALETTE["surface"])
         self.services = services
-        self._cache = []
-        self._filtered = []
-        self._selection = None
+        self.member_id = member_id or "mem_demo_001"
+        self.on_back = on_back
 
-        # 12-col root grid
-        for i in range(12):
-            self.grid_columnconfigure(i, weight=1, uniform="cols")
+        # camera state
+        self._photo_path = ""
+        self._cam = None
+        self._cam_running = False
+        self._stream_after = None
+
+        # ===== Top-level grid (NO page scrolling) =====
+        # Row 0: Title (fixed)     -> weight 0
+        # Row 1: Upper (two cols)  -> weight 3  (shrinks first)
+        # Row 2: Bottom row        -> weight 1  (kept visible)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=3)
         self.grid_rowconfigure(2, weight=1)
 
-        self._build_toolbar()
-        self._build_table()
-        self._build_side_panel()
-
-        self._refresh()
-
-    # ---------- UI builders ----------
-    def _build_toolbar(self):
-        bar = Card(self, "Subscriptions")
-        bar.grid(row=0, column=0, columnspan=12, sticky="ew", padx=10, pady=(12,8))
-        for i in range(8): bar.grid_columnconfigure(i, weight=1)
-        bar.grid_columnconfigure(8, weight=0)
-        bar.grid_columnconfigure(9, weight=0)
-        bar.grid_columnconfigure(10, weight=0)
-
-        # search
-        ctk.CTkLabel(bar, text="Search", text_color=PALETTE["muted"]).grid(row=1, column=0, padx=(12,8), pady=(0,10), sticky="w")
-        self.ent_q = ctk.CTkEntry(bar, placeholder_text="Member or plan…")
-        self.ent_q.grid(row=1, column=1, columnspan=3, sticky="ew", padx=(0,8), pady=(0,10))
-        self.ent_q.bind("<KeyRelease>", lambda e: self._apply_filters())
-
-        # status filter
-        ctk.CTkLabel(bar, text="Status", text_color=PALETTE["muted"]).grid(row=1, column=4, padx=(12,8), pady=(0,10), sticky="w")
-        self.opt_status = ctk.CTkOptionMenu(bar, values=["All", "active", "expired", "frozen", "cancelled"], width=140)
-        self.opt_status.set("All")
-        self.opt_status.grid(row=1, column=5, sticky="w", pady=(0,10))
-        self.opt_status.configure(command=lambda *_: self._apply_filters())
-
-        # plan filter
-        ctk.CTkLabel(bar, text="Plan", text_color=PALETTE["muted"]).grid(row=1, column=6, padx=(12,8), pady=(0,10), sticky="w")
-        self.opt_plan = ctk.CTkOptionMenu(bar, values=["All", "Monthly", "Quarterly", "Yearly"], width=140)
-        self.opt_plan.set("All")
-        self.opt_plan.grid(row=1, column=7, sticky="w", pady=(0,10))
-        self.opt_plan.configure(command=lambda *_: self._apply_filters())
-
-        # actions
-        ctk.CTkButton(bar, text="New Subscription", height=34, corner_radius=12,
+        # ===== Title bar =====
+        title = SectionCard(self, "Member Details")
+        title.grid(row=0, column=0, sticky="ew", padx=10, pady=(10,6))
+        title.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(title, text="Save", height=30, corner_radius=16,
                       fg_color=PALETTE["accent"], hover_color="#3e74d6",
-                      command=self._new_sub).grid(row=1, column=9, padx=(10,6), pady=(0,10), sticky="e")
-        ctk.CTkButton(bar, text="Renew", height=34, corner_radius=12,
+                      command=self._save).grid(row=0, column=1, sticky="e", padx=10)
+
+        # ===== Upper composite (2 columns) =====
+        upper = ctk.CTkFrame(self, fg_color="transparent")
+        upper.grid(row=1, column=0, sticky="nsew", padx=10, pady=4)
+        upper.grid_columnconfigure(0, weight=1, uniform="u")
+        upper.grid_columnconfigure(1, weight=1, uniform="u")
+        upper.grid_rowconfigure(0, weight=1)
+
+        # ---- LEFT: Profile Card
+        left = SectionCard(upper, "Profile")
+        left.grid(row=0, column=0, sticky="nsew", padx=(0,6))
+        left.grid_rowconfigure(1, weight=1)
+        left.grid_columnconfigure(0, weight=1)
+
+        pf = ctk.CTkFrame(left, fg_color="transparent")
+        pf.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0,8))
+        pf.grid_columnconfigure(0, weight=1)
+
+        # photo + capture/upload
+        photo_row = ctk.CTkFrame(pf, fg_color="transparent")
+        photo_row.grid(row=0, column=0, sticky="ew")
+        self.photo_box = ctk.CTkFrame(photo_row, width=130, height=150, fg_color=PALETTE["card2"], corner_radius=12)
+        self.photo_box.grid(row=0, column=0, rowspan=3, sticky="w", padx=(0,10))
+        self.photo_box.grid_propagate(False)
+        ctk.CTkLabel(self.photo_box, text="Photo", text_color=PALETTE["muted"]).place(relx=0.5, rely=0.5, anchor="center")
+        ctk.CTkButton(photo_row, text="capture", height=38, corner_radius=20,
                       fg_color="#2b3344", hover_color="#38445a",
-                      command=self._renew).grid(row=1, column=10, padx=(6,10), pady=(0,10), sticky="e")
-
-    def _build_table(self):
-        table = Card(self, "Results")
-        table.grid(row=1, column=0, columnspan=8, sticky="nsew", padx=10, pady=8)
-        table.grid_rowconfigure(2, weight=1)
-        table.grid_columnconfigure(0, weight=1)
-
-        # header
-        hdr = ctk.CTkFrame(table, fg_color=PALETTE["card2"], corner_radius=12)
-        hdr.grid(row=1, column=0, sticky="ew", padx=10, pady=(0,8))
-        cols = ("Member", "Plan", "Period", "Status")
-        weights = (35, 20, 28, 17)
-        for i, (t, w) in enumerate(zip(cols, weights)):
-            ctk.CTkLabel(hdr, text=t, text_color=PALETTE["muted"]).grid(row=0, column=i, padx=(12 if i==0 else 8,8), pady=8, sticky="w")
-            hdr.grid_columnconfigure(i, weight=w)
-
-        # list
-        self.listbox = ctk.CTkScrollableFrame(table, fg_color=PALETTE["card2"], corner_radius=12)
-        self.listbox.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0,10))
-
-    def _build_side_panel(self):
-        side = Card(self, "Details & Actions")
-        side.grid(row=1, column=8, columnspan=4, sticky="nsew", padx=10, pady=8)
-        side.grid_columnconfigure(0, weight=1)
-
-        # member + plan
-        self.lbl_member = ctk.CTkLabel(side, text="—", text_color=PALETTE["text"], font=("Segoe UI Semibold", 18))
-        self.lbl_member.grid(row=1, column=0, sticky="w", padx=12, pady=(6,2))
-        self.lbl_plan = ctk.CTkLabel(side, text="", text_color=PALETTE["muted"])
-        self.lbl_plan.grid(row=2, column=0, sticky="w", padx=12, pady=(0,2))
-        self.lbl_period = ctk.CTkLabel(side, text="", text_color=PALETTE["muted"])
-        self.lbl_period.grid(row=3, column=0, sticky="w", padx=12, pady=(0,8))
-
-        # status pill
-        self.pill_status = Pill(side, "status", "muted")
-        self.pill_status.grid(row=4, column=0, sticky="w", padx=12, pady=(0,10))
-
-        # action buttons
-        btns = ctk.CTkFrame(side, fg_color="transparent")
-        btns.grid(row=5, column=0, sticky="ew", padx=12, pady=(2,12))
-        btns.grid_columnconfigure(0, weight=1)
-        ctk.CTkButton(btns, text="Renew", height=36, corner_radius=12,
-                      fg_color=PALETTE["accent"], hover_color="#3e74d6",
-                      command=self._renew).grid(row=0, column=0, sticky="ew", pady=(0,8))
-        ctk.CTkButton(btns, text="Freeze", height=34, corner_radius=12,
+                      command=self._capture_photo).grid(row=0, column=1, sticky="ew", pady=(6,6))
+        ctk.CTkButton(photo_row, text="upload", height=38, corner_radius=20,
                       fg_color="#2b3344", hover_color="#38445a",
-                      command=self._freeze).grid(row=1, column=0, sticky="ew", pady=6)
-        ctk.CTkButton(btns, text="Cancel", height=34, corner_radius=12,
-                      fg_color=PALETTE["danger"], hover_color="#c03131",
-                      command=self._cancel).grid(row=2, column=0, sticky="ew", pady=6)
+                      command=self._upload_photo).grid(row=1, column=1, sticky="ew")
 
-    # ---------- data & filtering ----------
-    def _refresh(self):
-        data = []
+        # screenshot-style LEFT form rows (ALL in same container, correct order)
+        rows = ctk.CTkFrame(pf, fg_color="transparent")
+        rows.grid(row=2, column=0, sticky="nsew", pady=(8,0))
+        rows.grid_columnconfigure(0, weight=1)
+
+        self.ent_first = ScreenshotEntry(rows, "First name")
+        FormRow(rows, "First name *", self.ent_first).grid(row=0, column=0, sticky="ew", pady=6)
+
+        self.ent_last = ScreenshotEntry(rows, "Last name")
+        FormRow(rows, "Last name *", self.ent_last).grid(row=1, column=0, sticky="ew", pady=6)
+
+        self.ent_card = ScreenshotEntry(rows, "Card UID")
+        FormRow(rows, "Card UID *", self.ent_card).grid(row=2, column=0, sticky="ew", pady=6)
+
+        self.ent_phone_left = ScreenshotEntry(rows, "Phone (optional)")
+        FormRow(rows, "Phone", self.ent_phone_left).grid(row=3, column=0, sticky="ew", pady=6)
+
+        # inline: Active pill + Status dropdown (same line)
+        inline = ctk.CTkFrame(rows, fg_color="transparent")
+        inline.grid(row=4, column=0, sticky="ew", pady=(6,6))
+        inline.grid_columnconfigure(0, weight=0)
+        inline.grid_columnconfigure(1, weight=1)
+        self.active_pill = Pill(inline, "Active", bg="#1e3325", fg=PALETTE["ok"])
+        self.active_pill.grid(row=0, column=0, padx=(0,10))
+        self.opt_status = BigOptionMenu(inline, STATUSES); self.opt_status.set("active")
+        self.opt_status.grid(row=0, column=1, sticky="w")
+
+        self.ent_join = ScreenshotEntry(rows, dt.date.today().isoformat())
+        FormRow(rows, "Join date", self.ent_join).grid(row=5, column=0, sticky="ew", pady=6)
+
+        # ✅ Debt fixed: aligned properly under Join date
+        self.ent_debt = ScreenshotEntry(rows, "0")
+        FormRow(rows, "Debt (DA)", self.ent_debt).grid(row=6, column=0, sticky="ew", pady=6)
+
+        # text feedback
+        self.lbl_join = ctk.CTkLabel(left, text="Joined —", text_color=PALETTE["muted"])
+        self.lbl_join.grid(row=2, column=0, sticky="w", padx=10, pady=(0,8))
+
+        # ---- RIGHT: Subscription + Visits
+        right = ctk.CTkFrame(upper, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew", padx=(6,0))
+        right.grid_rowconfigure(1, weight=1)
+        right.grid_columnconfigure(0, weight=1)
+
+        card_sub = SectionCard(right, "Current Subscription")
+        card_sub.grid(row=0, column=0, sticky="ew")
+        card_sub.grid_columnconfigure(0, weight=1)
+
+        self.lbl_planline = ctk.CTkLabel(
+            card_sub,
+            text="Plan: Monthly   •   Start: 2025-09-01   •   End: 2025-09-30   •   Status: active",
+            text_color=PALETTE["muted"])
+        self.lbl_planline.grid(row=1, column=0, sticky="w", padx=10, pady=(0,6))
+
+        act = ctk.CTkFrame(card_sub, fg_color="transparent")
+        act.grid(row=2, column=0, sticky="w", padx=10, pady=(0,8))
+        ctk.CTkButton(act, text="black list", height=30, corner_radius=18,
+                      fg_color="#2b3344", hover_color="#3a455e").grid(row=0, column=0, padx=(0,10))
+        ctk.CTkButton(act, text="Renew", height=30, corner_radius=18,
+                      fg_color=PALETTE["accent"], hover_color="#3e74d6").grid(row=0, column=1, padx=6)
+        ctk.CTkButton(act, text="Freeze", height=30, corner_radius=18,
+                      fg_color="#263042", hover_color="#32405a").grid(row=0, column=2, padx=6)
+        ctk.CTkButton(act, text="Block", height=30, corner_radius=18,
+                      fg_color="#3a1418", hover_color="#5a1d22").grid(row=0, column=3, padx=6)
+
+        card_visits = SectionCard(right, "Last Visits")
+        card_visits.grid(row=1, column=0, sticky="nsew", pady=(6,0))
+        card_visits.grid_rowconfigure(1, weight=1)
+        self.table = Table(card_visits, headers=("Date","Status","Reason","Gate"))
+        self.table.grid(row=1, column=0, sticky="nsew", padx=6, pady=(0,6))
+
+        # ===== Bottom section (screenshot-style, always visible) =====
+        bottom = ctk.CTkFrame(self, fg_color=PALETTE["card"], corner_radius=16)
+        bottom.grid(row=2, column=0, sticky="nsew", padx=10, pady=(6,10))
+        bottom.grid_columnconfigure((0,1), weight=1, uniform="b")
+
+        # Left column
+        col_left = ctk.CTkFrame(bottom, fg_color="transparent")
+        col_left.grid(row=0, column=0, sticky="nsew", padx=8, pady=10)
+        col_left.grid_columnconfigure(0, weight=1)
+
+        self.ent_start_date_l = ScreenshotEntry(col_left, dt.date.today().isoformat())
+        FormRow(col_left, "Start date", self.ent_start_date_l).grid(row=0, column=0, sticky="ew", pady=6)
+
+        self.ent_phone_bottom = ScreenshotEntry(col_left, "Phone number")
+        FormRow(col_left, "Phone number", self.ent_phone_bottom).grid(row=1, column=0, sticky="ew", pady=6)
+
+        self.opt_sex = BigOptionMenu(col_left, SEXES); self.opt_sex.set(SEXES[0])
+        FormRow(col_left, "Sex", self.opt_sex).grid(row=2, column=0, sticky="ew", pady=6)
+
+        # Right column
+        col_right = ctk.CTkFrame(bottom, fg_color="transparent")
+        col_right.grid(row=0, column=1, sticky="nsew", padx=8, pady=10)
+        col_right.grid_columnconfigure(0, weight=1)
+
+        self.ent_start_date_r = ScreenshotEntry(col_right, dt.date.today().isoformat())
+        FormRow(col_right, "Start date", self.ent_start_date_r).grid(row=0, column=0, sticky="ew", pady=6)
+
+        self.ent_plan = BigOptionMenu(col_right, PLANS); self.ent_plan.set(PLANS[0])
+        FormRow(col_right, "Plan", self.ent_plan).grid(row=1, column=0, sticky="ew", pady=6)
+
+        self.ent_end_date = ScreenshotEntry(col_right, (dt.date.today() + dt.timedelta(days=30)).isoformat())
+        FormRow(col_right, "Expiration date", self.ent_end_date).grid(row=2, column=0, sticky="ew", pady=6)
+
+        # ---- load mock data ----
+        self._load_member(self.member_id)
+        self._load_visits(self.member_id)
+
+    # ---------- helpers ----------
+    def _upload_photo(self):
+        path = filedialog.askopenfilename(
+            title="Choose image",
+            filetypes=[("Image files", "*.png;*.jpg;*.jpeg;*.bmp;*.webp")])
+        if path:
+            ctk.CTkLabel(self.photo_box, text=path, text_color=PALETTE["muted"], wraplength=110)\
+                .place(relx=0.5, rely=0.5, anchor="center")
+            self._photo_path = path
+
+    def _capture_photo(self):
+        if not HAS_CV2:
+            messagebox.showwarning("Camera", "OpenCV (cv2) not installed.")
+            return
         try:
-            if self.services and hasattr(self.services, "list_subscriptions"):
-                data = self.services.list_subscriptions(None) or []
+            cam = cv2.VideoCapture(0, cv2.CAP_DSHOW) if hasattr(cv2, "CAP_DSHOW") else cv2.VideoCapture(0)
+            if not cam or not cam.isOpened():
+                raise RuntimeError("No camera detected.")
+            ret, frame = cam.read()
+            cam.release()
+            if not ret:
+                raise RuntimeError("Capture failed.")
+            import os, time
+            photos_dir = os.path.join(os.getcwd(), ".photos"); os.makedirs(photos_dir, exist_ok=True)
+            path = os.path.join(photos_dir, f"member_{int(time.time())}.jpg")
+            cv2.imwrite(path, frame)
+            ctk.CTkLabel(self.photo_box, text=path, text_color=PALETTE["muted"], wraplength=110)\
+                .place(relx=0.5, rely=0.5, anchor="center")
+            self._photo_path = path
+            messagebox.showinfo("Captured", f"Saved: {path}")
+        except Exception as e:
+            messagebox.showwarning("Camera", f"{e}")
+
+    def _load_member(self, member_id: str):
+        m = self._fetch_member(member_id)
+        # left form
+        self.ent_first.delete(0, "end"); self.ent_first.insert(0, m.get("first_name",""))
+        self.ent_last.delete(0, "end");  self.ent_last.insert(0, m.get("last_name",""))
+        self.ent_card.delete(0, "end");  self.ent_card.insert(0, m.get("card_uid",""))
+        self.ent_phone_left.delete(0, "end"); self.ent_phone_left.insert(0, m.get("phone",""))
+        self.opt_status.set((m.get("status") or "active").lower())
+        self.ent_join.delete(0, "end");  self.ent_join.insert(0, m.get("join_date", dt.date.today().isoformat()))
+        self.ent_debt.delete(0, "end");  self.ent_debt.insert(0, str(int(float(m.get("debt", 0) or 0))))
+        self.lbl_join.configure(text=f"Joined {m.get('join_date', dt.date.today().isoformat())}")
+        pp = m.get("photo_path","")
+        if pp:
+            ctk.CTkLabel(self.photo_box, text=pp, text_color=PALETTE["muted"], wraplength=110)\
+                .place(relx=0.5, rely=0.5, anchor="center")
+            self._photo_path = pp
+        # bottom
+        self.ent_phone_bottom.delete(0, "end"); self.ent_phone_bottom.insert(0, m.get("phone",""))
+        self.opt_sex.set(m.get("sex","Male"))
+        self.ent_start_date_l.delete(0, "end"); self.ent_start_date_l.insert(0, m.get("start_left", dt.date.today().isoformat()))
+        self.ent_start_date_r.delete(0, "end"); self.ent_start_date_r.insert(0, m.get("start_right", dt.date.today().isoformat()))
+        self.ent_end_date.delete(0, "end");    self.ent_end_date.insert(0, m.get("end_date", (dt.date.today()+dt.timedelta(days=30)).isoformat()))
+        self.ent_plan.set(m.get("plan","Monthly"))
+
+    def _load_visits(self, member_id: str):
+        rows = self._fetch_visits(member_id)
+        self.table.set_rows(rows)
+
+    def _fetch_member(self, member_id: str) -> Dict[str, Any]:
+        if self.services and hasattr(self.services, "members") and hasattr(self.services.members, "get"):
+            try:
+                data = self.services.members.get(member_id)
+                if data: return data
+            except Exception:
+                pass
+        today = dt.date.today().isoformat()
+        return {
+            "id": member_id, "first_name": "Omar", "last_name": "K.",
+            "card_uid": "ABCD1234", "status": "active", "join_date": today,
+            "phone": "05 700 111 22", "sex": "Male", "plan": "Monthly",
+            "start_left": today, "start_right": today, "end_date": (dt.date.today()+dt.timedelta(days=30)).isoformat(),
+            "debt": 0, "photo_path": ""
+        }
+
+    def _fetch_visits(self, member_id: str) -> List[Sequence[str]]:
+        if self.services and hasattr(self.services, "checkins") and hasattr(self.services.checkins, "history"):
+            try:
+                rows = list(self.services.checkins.history(member_id, limit=10))
+                return [(r.get("date","—"), r.get("status","—"), r.get("reason","—"), r.get("gate","—")) for r in rows]
+            except Exception:
+                pass
+        now = dt.datetime.now()
+        out = []
+        for i in range(3):
+            d = (now - dt.timedelta(days=i)).strftime("%Y-%m-%d")
+            out.append((d, "allowed", "-", "A"))
+        return out
+
+    def _save(self):
+        # required
+        card  = self.ent_card.get().strip()
+        first = self.ent_first.get().strip()
+        last  = self.ent_last.get().strip()
+        if not card:  messagebox.showwarning("Missing", "Card UID is required."); return
+        if not first: messagebox.showwarning("Missing", "First name is required."); return
+        if not last:  messagebox.showwarning("Missing", "Last name is required."); return
+
+        # validate dates
+        for val in (self.ent_join.get().strip(),
+                    self.ent_start_date_l.get().strip(),
+                    self.ent_start_date_r.get().strip(),
+                    self.ent_end_date.get().strip()):
+            if val:
+                try: dt.datetime.strptime(val, "%Y-%m-%d")
+                except Exception:
+                    messagebox.showwarning("Invalid date", "Use YYYY-MM-DD."); return
+
+        # validate debt
+        debt_raw = self.ent_debt.get().strip() or "0"
+        try:
+            debt = int(float(debt_raw))
         except Exception:
-            data = []
-        if not data:
-            data = [
-                {"subscription_id": 7001, "member_id": 100, "member_name":"Nadia K.", "plan":"Monthly",   "status":"active",   "start_date":"2025-09-01", "end_date":"2025-09-30"},
-                {"subscription_id": 7002, "member_id": 101, "member_name":"Karim B.", "plan":"Monthly",   "status":"active",   "start_date":"2025-09-05", "end_date":"2025-10-04"},
-                {"subscription_id": 7003, "member_id": 102, "member_name":"Hind M.",  "plan":"Monthly",   "status":"expired",  "start_date":"2025-07-01", "end_date":"2025-07-31"},
-                {"subscription_id": 7004, "member_id": 103, "member_name":"Leila R.", "plan":"Quarterly", "status":"frozen",   "start_date":"2025-06-01", "end_date":"2025-08-31"},
-                {"subscription_id": 7005, "member_id": 104, "member_name":"Amine S.", "plan":"Yearly",    "status":"cancelled","start_date":"2025-01-01", "end_date":"2025-12-31"},
-            ]
-        self._cache = data
-        self._apply_filters()
+            messagebox.showwarning("Invalid", "Debt must be a number."); return
 
-    def _apply_filters(self):
-        q = (self.ent_q.get() if hasattr(self, "ent_q") else "").strip().lower()
-        fstatus = self.opt_status.get() if hasattr(self, "opt_status") else "All"
-        fplan   = self.opt_plan.get() if hasattr(self, "opt_plan") else "All"
+        status = (self.opt_status.get() or "active").lower()
+        if status not in STATUSES: status = "active"
 
-        res = []
-        for s in self._cache:
-            name = (s.get("member_name") or "").lower()
-            plan = (s.get("plan") or "").lower()
-            status = (s.get("status") or "").lower()
+        data = {
+            "card_uid": card,
+            "first_name": first,
+            "last_name": last,
+            "phone": self.ent_phone_left.get().strip() or self.ent_phone_bottom.get().strip(),
+            "status": status,
+            "join_date": self.ent_join.get().strip() or dt.date.today().isoformat(),
+            "debt": debt,
+            "photo_path": self._photo_path,
+            # bottom details
+            "sex": self.opt_sex.get(),
+            "plan": self.ent_plan.get(),
+            "start_left": self.ent_start_date_l.get().strip(),
+            "start_right": self.ent_start_date_r.get().strip(),
+            "end_date": self.ent_end_date.get().strip(),
+        }
 
-            if fstatus != "All" and status != fstatus:
-                continue
-            if fplan != "All" and (s.get("plan") != fplan):
-                continue
-            if q and q not in name and q not in plan:
-                continue
-            res.append(s)
+        try:
+            if self.services and hasattr(self.services, "members") and hasattr(self.services.members, "update"):
+                self.services.members.update(self.member_id, data)
+        except Exception as e:
+            messagebox.showwarning("Save", f"Could not save: {e}"); return
 
-        self._filtered = res
-        self._render_rows()
+        # Update pill
+        if status == "active":
+            self.active_pill.configure(fg_color="#1e3325")
+            for w in self.active_pill.winfo_children():
+                if isinstance(w, ctk.CTkLabel): w.configure(text="Active", text_color=PALETTE["ok"])
+        else:
+            col = {"suspended":"#33240f","expired":"#3a1418","blacklisted":"#3a1418"}.get(status, "#3a1418")
+            fg  = {"suspended":PALETTE["warn"],"expired":PALETTE["danger"],"blacklisted":PALETTE["danger"]}.get(status, PALETTE["danger"])
+            self.active_pill.configure(fg_color=col)
+            for w in self.active_pill.winfo_children():
+                if isinstance(w, ctk.CTkLabel): w.configure(text=status.capitalize(), text_color=fg)
 
-    # ---------- render ----------
-    def _render_rows(self):
-        for w in list(self.listbox.children.values()):
-            w.destroy()
+        messagebox.showinfo("Saved", "Member saved.")
 
-        if not self._filtered:
-            ctk.CTkLabel(self.listbox, text="No results", text_color=PALETTE["muted"]).pack(padx=12, pady=8, anchor="w")
-            return
-
-        for s in self._filtered:
-            row = ctk.CTkFrame(self.listbox, fg_color=PALETTE["card"], corner_radius=10)
-            row.pack(fill="x", padx=8, pady=6)
-
-            row.grid_columnconfigure(0, weight=35)
-            row.grid_columnconfigure(1, weight=20)
-            row.grid_columnconfigure(2, weight=28)
-            row.grid_columnconfigure(3, weight=17)
-
-            nm = s.get("member_name") or f"#{s.get('member_id','')}"
-            ctk.CTkLabel(row, text=nm, text_color=PALETTE["text"]).grid(row=0, column=0, padx=(12,8), pady=8, sticky="w")
-            ctk.CTkLabel(row, text=s.get("plan","—"), text_color=PALETTE["muted"]).grid(row=0, column=1, padx=8, sticky="w")
-            ctk.CTkLabel(row, text=f"{s.get('start_date','—')} → {s.get('end_date','—')}", text_color=PALETTE["muted"]).grid(row=0, column=2, padx=8, sticky="w")
-
-            st = (s.get("status") or "").lower()
-            kind = "ok" if st == "active" else ("warn" if st == "frozen" else ("danger" if st in ("expired","cancelled") else "muted"))
-            Pill(row, st or "—", kind=kind).grid(row=0, column=3, padx=8, sticky="w")
-
-            # selection
-            row.bind("<Button-1>", lambda e, sub=s: self._select(sub))
-            for child in row.winfo_children():
-                child.bind("<Button-1>", lambda e, sub=s: self._select(sub))
-
-    def _select(self, sub: dict):
-        self._selection = sub
-        nm = sub.get("member_name") or f"#{sub.get('member_id','')}"
-        self.lbl_member.configure(text=nm)
-        self.lbl_plan.configure(text=sub.get("plan","—"))
-        self.lbl_period.configure(text=f"{sub.get('start_date','—')} → {sub.get('end_date','—')}")
-        st = (sub.get("status") or "").lower()
-        kind = "ok" if st == "active" else ("warn" if st == "frozen" else ("danger" if st in ("expired","cancelled") else "muted"))
-        # replace pill
-        self.pill_status.destroy()
-        self.pill_status = Pill(self, st or "—", kind=kind)
-        # Put it back where it belongs (row 4 of side panel)
-        self.pill_status.grid(in_=self.lbl_member.master, row=4, column=0, sticky="w", padx=12, pady=(0,10))
-
-    # ---------- actions (UI stubs unless services provided) ----------
-    def _new_sub(self):
-        messagebox.showinfo("Subscriptions", "UI-only: New Subscription dialog will be added later.")
-
-    def _renew(self):
-        if not self._selection:
-            messagebox.showwarning("Subscriptions", "Select a subscription first.")
-            return
-        fn = getattr(self.services, "renew_subscription", None)
-        if callable(fn):
-            try:
-                fn(self._selection.get("subscription_id"))
-                messagebox.showinfo("Renew", "Subscription renewed.")
-                self._refresh(); return
-            except Exception as e:
-                messagebox.showerror("Renew", str(e)); return
-        messagebox.showinfo("Renew", "UI-only; logic will be wired later.")
-
-    def _freeze(self):
-        if not self._selection:
-            messagebox.showwarning("Subscriptions", "Select a subscription first.")
-            return
-        fn = getattr(self.services, "freeze_subscription", None)
-        if callable(fn):
-            try:
-                fn(self._selection.get("subscription_id"))
-                messagebox.showinfo("Freeze", "Subscription frozen.")
-                self._refresh(); return
-            except Exception as e:
-                messagebox.showerror("Freeze", str(e)); return
-        messagebox.showinfo("Freeze", "UI-only; logic will be wired later.")
-
-    def _cancel(self):
-        if not self._selection:
-            messagebox.showwarning("Subscriptions", "Select a subscription first.")
-            return
-        fn = getattr(self.services, "cancel_subscription", None)
-        if callable(fn):
-            try:
-                fn(self._selection.get("subscription_id"))
-                messagebox.showinfo("Cancel", "Subscription cancelled.")
-                self._refresh(); return
-            except Exception as e:
-                messagebox.showerror("Cancel", str(e)); return
-        messagebox.showinfo("Cancel", "UI-only; logic will be wired later.")
-
-
-# local quick test
+# --- local preview
 if __name__ == "__main__":
     ctk.set_appearance_mode("dark"); ctk.set_default_color_theme("blue")
     root = ctk.CTk(); root.geometry("1200x720"); root.configure(fg_color=PALETTE["bg"])
-    page = SubscriptionsPage(root, services=None); page.pack(fill="both", expand=True)
+    page = MemberProfilePage(root, services=None, member_id="mem_demo_001")
+    page.pack(fill="both", expand=True)
     root.mainloop()

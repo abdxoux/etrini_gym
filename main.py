@@ -2,11 +2,11 @@
 import os
 import customtkinter as ctk
 from router import AppShell, PALETTE
-from pages.login import LoginDialog  # styled dialog you moved earlier
+from pages.login import LoginDialog  # your styled dialog
 
-APP_TITLE   = "GymPro"
-DEFAULT_SIZE= "1400x900"
-DB_PATH     = "gym_management.db"
+APP_TITLE    = "GymPro"
+DEFAULT_SIZE = "1400x900"
+DB_PATH      = "gym_management.db"
 
 # ---------------- helpers ----------------
 def ensure_sqlite_file(path: str):
@@ -21,7 +21,6 @@ def try_load_auth_service(db_path: str):
         return None
 
 # ---------------- stub services (UI demo-safe) ----------------
-
 class StubServices:
     """
     Minimal shim so pages don't crash while logic isn't wired yet.
@@ -30,15 +29,16 @@ class StubServices:
     def __init__(self):
         # session fields (set by main() after login)
         self.session_role = "Admin"
-        self.user_name    = "user"
+        self.user_name = "user"
+
 
         # demo stores
         self._products = [
             {"product_id": 1, "name": "Water Bottle 500ml", "price": 2.50, "stock_qty": 3,  "low_stock_threshold": 5, "category": "Drinks"},
             {"product_id": 2, "name": "Protein Bar",        "price": 1.80, "stock_qty": 12, "low_stock_threshold": 6, "category": "Snacks"},
-            {"product_id": 3, "name": "T-Shirt",             "price": 9.90, "stock_qty": 2,  "low_stock_threshold": 3, "category": "Merch"},
+            {"product_id": 3, "name": "T-Shirt",            "price": 9.90, "stock_qty": 2,  "low_stock_threshold": 3, "category": "Merch"},
         ]
-        self._orders = {}     # order_id -> dict
+        self._orders = {}
         self._next_order_id = 1001
 
         self._members = [
@@ -58,47 +58,34 @@ class StubServices:
         # optional real auth service (injected by main)
         self.auth = None
 
-    # ---- POS (used by pages/pos.py) ----
+    # ---- POS ----
     def create_order(self, member_id=None):
-        oid = self._next_order_id
-        self._next_order_id += 1
+        oid = self._next_order_id; self._next_order_id += 1
         order = {"order_id": oid, "member_id": member_id, "lines": [], "total_amount": 0.0, "status": "open"}
         self._orders[oid] = order
         return order
 
     def list_products(self, q: str = ""):
         q = (q or "").lower()
-        if not q:
-            return list(self._products)
+        if not q: return list(self._products)
         return [p for p in self._products if q in p["name"].lower()]
 
     def find_products(self, q: str = "", category: str | None = None):
-        """
-        Signature expected by your POS page. Returns a list (iterable) of product dicts.
-        'category' is optional here; we filter by it if provided.
-        """
         items = self.list_products(q)
-        if category:
-            items = [p for p in items if p.get("category") == category]
+        if category: items = [p for p in items if p.get("category") == category]
         return items
 
     def add_order_line(self, order_id: int, product_id: int, quantity: int):
         order = self._orders.get(order_id)
         prod  = next((p for p in self._products if p["product_id"] == product_id), None)
-        if not order or not prod:
-            return None
+        if not order or not prod: return None
         qty = max(1, int(quantity))
-        # stock guard
         take = min(qty, max(0, int(prod["stock_qty"])))
-        if take == 0:
-            return order  # nothing to add if no stock; still safe
+        if take == 0: return order
         line_total = round(take * float(prod["price"]), 2)
         order["lines"].append({
-            "product_id": product_id,
-            "name": prod["name"],
-            "quantity": take,
-            "unit_price": prod["price"],
-            "line_total": line_total,
+            "product_id": product_id, "name": prod["name"],
+            "quantity": take, "unit_price": prod["price"], "line_total": line_total,
         })
         order["total_amount"] = round(sum(l["line_total"] for l in order["lines"]), 2)
         prod["stock_qty"] -= take
@@ -106,47 +93,36 @@ class StubServices:
 
     def pay_order(self, order_id: int, amount: float, method: str = "cash"):
         order = self._orders.get(order_id)
-        if not order:
-            return None
+        if not order: return None
         order["status"] = "paid" if amount >= order["total_amount"] else "partial"
         return {"order_id": order_id, "status": order["status"], "paid": float(amount)}
 
-    # ---- Inventory (used by pages/inventory.py) ----
+    # ---- Inventory ----
     def low_stock_alerts(self):
-        """
-        Inventory page does: ' · '.join(alerts[:3]) so it expects a list[str].
-        Return human-readable strings here.
-        """
         alerts = []
         for p in self._products:
             if p["stock_qty"] <= p["low_stock_threshold"]:
                 alerts.append(f"{p['name']} ({p['stock_qty']}≤{p['low_stock_threshold']})")
         return alerts
 
-    # (Optional) if any other page expects raw dicts, expose a separate accessor:
     def low_stock_items(self):
         return [p for p in self._products if p["stock_qty"] <= p["low_stock_threshold"]]
 
-    # ---- Members / Profile / Subscriptions (light stubs) ----
+    # ---- Members / Profile / Subscriptions ----
     def list_members(self, q: str = ""):
         q = (q or "").lower()
-        if not q:
-            return list(self._members)
+        if not q: return list(self._members)
         return [m for m in self._members if q in f"{m['first_name']} {m['last_name']}".lower()]
 
     def get_member(self, member_id: int):
         return next((m for m in self._members if m["member_id"] == member_id), None)
 
     def list_subscriptions(self, member_id: int | None = None):
-        if member_id is None:
-            return list(self._subs)
+        if member_id is None: return list(self._subs)
         return [s for s in self._subs if s["member_id"] == member_id]
 
-    def renew_subscription(self, *args, **kwargs):
-        return True
-
-    def freeze_subscription(self, *args, **kwargs):
-        return True
+    def renew_subscription(self, *args, **kwargs): return True
+    def freeze_subscription(self, *args, **kwargs): return True
 
     # ---- Attendance ----
     def scan_uid(self, uid: str):
@@ -155,14 +131,12 @@ class StubServices:
         return {"status": "allowed" if m["status"] == "active" else "denied", "member": m}
 
     def list_checkins(self, member_id: int | None = None):
-        if member_id is None:
-            return list(self._checkins)
+        if member_id is None: return list(self._checkins)
         return [c for c in self._checkins if c["member_id"] == member_id]
 
-    # ---- ultra-safe fallback: ANY missing attribute becomes a no-op callable ----
+    # ---- ultra-safe fallback ----
     def __getattr__(self, name):
-        def _noop(*a, **k):
-            return None
+        def _noop(*a, **k): return None
         return _noop
 
 # ---------------- main ----------------
@@ -195,12 +169,12 @@ def main():
         root.destroy()
         return
 
-    # session into services (used by header/sidebar)
+    # session into services
     services.user_name = dlg.result["user"]
     services.session_role = dlg.result["role"]
 
-    # mount app
-    app = AppShell(root, services=services, start_route="Dashboard")
+    # mount app — start at Home (header visible only on Home)
+    app = AppShell(root, services=services, start_route="Home")
     app.pack(fill="both", expand=True)
 
     root.mainloop()
